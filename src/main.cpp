@@ -1,4 +1,4 @@
-#include <Arduino.h>
+﻿#include <Arduino.h>
 #include <stdio.h>
 #include "driver/ledc.h"
 #include "esp_err.h"
@@ -6,14 +6,17 @@
 #include "math.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "Arduino_APDS9960.h"
+#include "../lib/APDS9960/src/Arduino_APDS9960.h"
+#include <ConnectivityHandler.h>
+#include "FS.h"
+#include "server/endpoint/EndpointRegistry.h"
 
 #define LED_TIMER LEDC_TIMER_0
 #define LED_SPEEDMODE LEDC_LOW_SPEED_MODE
 #define LED_PIN GPIO_NUM_23
 #define LED_CHANNEL LEDC_CHANNEL_0
 #define LED_PWMFREQ LEDC_TIMER_12_BIT
-#define MAX_DEC_VAL 200
+#define MAX_DEC_VAL 1000
 
 static uint8_t led_state = 0;
 static uint8_t led_brightness = 0;
@@ -26,9 +29,13 @@ typedef struct TaskData
 
 TaskData_t taskDataSync = {};
 
+const char* ssid = "Speedy Gonzales";
+const char* password = "tenerife";
+
+ConnectivityHandler connectivityHandler = ConnectivityHandler(ssid, password);
+
 void initPWM()
 {
-
   // configure the timer for the PWM.
   ledc_timer_config_t pwmConfig = {};
   pwmConfig.duty_resolution = LED_PWMFREQ;
@@ -129,102 +136,117 @@ void rampDown(uint16_t duration)
       NULL);
 }
 
+
+void handleGestureSensor(){
+    // delay or suffer wdt timeouts.
+    // vTaskDelay(2000 / portTICK_PERIOD_MS);
+
+    if (APDS.gestureAvailable())
+    {
+        // a gesture was detected, read and print to Serial Monitor
+        int gesture = APDS.readGesture();
+
+        switch (gesture)
+        {
+            case GESTURE_UP:
+                Serial.println("LED Strip ON.");
+                if (led_state != 1)
+                {
+                    led_state = 1;
+                    led_brightness = 100;
+                    taskDataSync.duration = 1000;
+                    rampUpTask((void *)&taskDataSync);
+                }
+
+                break;
+
+            case GESTURE_DOWN:
+                Serial.println("LED Strip OFF.");
+                if (led_state != 0)
+                {
+                    led_state = 0;
+                    led_brightness = 0;
+                    taskDataSync.duration = 1000;
+                    rampDownTask((void *)&taskDataSync);
+                }
+                break;
+
+            case GESTURE_RIGHT:
+                Serial.println("Brightness Down.");
+                // if the led strip is actually on
+                if (led_state == 1)
+                {
+                    // decrease brightness by 25%
+                    led_brightness -= 25;
+                    // limit
+                    if (led_brightness <= 0)
+                    {
+                        led_brightness = 0;
+                        led_state = 0;
+                    }
+                }
+
+                ledc_set_duty(LED_SPEEDMODE, LED_CHANNEL, duty2dec(led_brightness));
+                break;
+
+            case GESTURE_LEFT:
+                Serial.println("Brightness Up.");
+                // if the led strip is actually on
+                if (led_state == 1)
+                {
+                    // increase brightness by 25%
+                    led_brightness += 25;
+
+                    // limit
+                    if (led_brightness >= 100)
+                    {
+                        led_brightness = 100;
+                    }
+                }
+
+                ledc_set_duty(LED_SPEEDMODE, LED_CHANNEL, duty2dec(led_brightness));
+                break;
+
+            default:
+                // ignore
+                break;
+        }
+    }
+}
+
 void setup()
 {
-  initPWM();
+    HTTPEndpoint httpEndpoint = HTTPEndpoint::begin();
+    EndpointRegistry::registerEndpoints(httpEndpoint);
 
-  Serial.begin(115200);
-  Serial.println("Starting...");
+    initPWM();
 
-  if (!APDS.begin())
-  {
-    Serial.println("Error initializing APDS-9960 sensor!");
-  }
+    Serial.begin(115200);
+    Serial.println("Starting...");
 
-  xTaskCreate(
-      timerUpdaterTask, // Function to implement the task
-      "timerUpdater",   // Name of the task
-      1000,             // Stack size in words
-      NULL,             // Task input parameter
-      1,                // Priority of the task
-      NULL              // Task handle.
-  );                    // Core where the task should run
+    if (!APDS.begin())
+    {
+        Serial.println("Error initializing APDS-9960 sensor ... either there is no sensor or the wiring is incomplete.");
+    }
+
+    connectivityHandler.begin(httpEndpoint);
+
+    xTaskCreate(
+            timerUpdaterTask, // Function to implement the task
+            "timerUpdater",   // Name of the task
+            1000,             // Stack size in words
+            NULL,             // Task input parameter
+            1,                // Priority of the task
+            NULL              // Task handle.
+    );                    // Core where the task should run
 }
+
 
 void loop()
 {
-  // delay or suffer wdt timeouts.
-  // vTaskDelay(2000 / portTICK_PERIOD_MS);
+    // run the gesture sensor state machine
+    handleGestureSensor();
 
-  if (APDS.gestureAvailable())
-  {
-    // a gesture was detected, read and print to Serial Monitor
-    int gesture = APDS.readGesture();
-
-    switch (gesture)
-    {
-    case GESTURE_UP:
-      Serial.println("LED Strip ON.");
-      if (led_state != 1)
-      {
-        led_state = 1;
-        led_brightness = 100;
-        taskDataSync.duration = 1000;
-        rampUpTask((void *)&taskDataSync);
-      }
-
-      break;
-
-    case GESTURE_DOWN:
-      Serial.println("LED Strip OFF.");
-      if (led_state != 0)
-      {
-        led_state = 0;
-        led_brightness = 0;
-        taskDataSync.duration = 1000;
-        rampDownTask((void *)&taskDataSync);
-      }
-      break;
-
-    case GESTURE_RIGHT:
-      Serial.println("Brightness Down.");
-      // if the led strip is actually on
-      if (led_state == 1)
-      {
-        // decrease brightness by 25%
-        led_brightness -= 25;
-        // limit
-        if (led_brightness <= 0)
-        {
-          led_brightness = 0;
-          led_state = 0;
-        }
-      }
-
-      ledc_set_duty(LED_SPEEDMODE, LED_CHANNEL, duty2dec(led_brightness));
-      break;
-
-    case GESTURE_LEFT:
-      Serial.println("Brightness Up.");
-      // if the led strip is actually on
-      if (led_state == 1)
-      {
-        // increase brightness by 25%
-        led_brightness += 25;
-
-        // limit
-        if (led_brightness >= 100)
-        {
-          led_brightness = 100;
-        }
-      }
-
-      ledc_set_duty(LED_SPEEDMODE, LED_CHANNEL, duty2dec(led_brightness));
-      break;
-
-    default:
-      // ignore
-      break;
-    }
-  }
+    // run the connectivity handler to handle HTTP requests.
+    connectivityHandler.handle();
 }
